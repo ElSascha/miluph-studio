@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "miluph-studio"
+version = "0.1.0"
+description = "Backend for Miluph Studio"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "h5py",
+    "numpy",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend/miluph_studio"]
