@@ -1,0 +1,4 @@
+miluphcuda_instances:
+- name: "local"
+  mode: "local"
+  path: "/Users/saschaeckstein/Documents/miluphcuda"

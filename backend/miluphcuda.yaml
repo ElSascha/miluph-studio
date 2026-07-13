@@ -1,0 +1,21 @@
+global = {
+    c_gravity = 6.67408e-11
+};
+
+materials =
+(
+    {
+        ID = 0
+        name = "demo"
+        eos = {
+            type = 1
+            rho_0 = 3000.0
+            bulk_modulus = 10000000000.0
+            n = 1.0
+        }
+        artificial_viscosity = {
+            alpha = 1.0
+            beta = 2.0
+        }
+    }
+);
