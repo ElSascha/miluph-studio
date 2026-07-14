@@ -128,57 +128,112 @@ def write_parameter_header(path: Path, values: dict[str, Any]) -> str:
 
 def write_miluphcuda_config(path: Path, values: dict[str, Any]) -> str:
     resolved = _coerce_values(values)
+    # Build a material.cfg-style config block. Keep formatting compatible with
+    # existing fixtures (materials = ( { ... }, ... ); ). Produce one material
+    # entry filled from resolved values and close the materials list properly.
+    # Build extra EoS lines from any resolved keys not represented explicitly
+    def _format_value(v: Any) -> str:
+        if isinstance(v, bool):
+            return '1' if v else '0'
+        if isinstance(v, (int, float)):
+            # preserve large floats in scientific notation when appropriate
+            return f"{v:.6g}"
+        # attempt numeric conversion for strings
+        try:
+            fv = float(str(v))
+            return f"{fv:.6g}"
+        except Exception:
+            return f'"{str(v)}"'
+
+    # keys already rendered at top-level or structural
+    top_level_keys = {
+        'simulation_name', 'rho_0', 'bulk_modulus', 'n', 'alpha', 'beta', 'c_gravity',
+        'include', 'eos_type', 'shear_modulus', 'sml',
+    }
+
+    # whitelist of allowed EOS/porosity/plasticity parameter names we will write
+    allowed_eos_keys = {
+        'porjutzi_p_elastic', 'porjutzi_p_transition', 'porjutzi_p_compacted',
+        'porjutzi_alpha_0', 'porjutzi_alpha_e', 'porjutzi_alpha_t',
+        'porjutzi_n1', 'porjutzi_n2', 'cs_porous', 'crushcurve_style',
+        'yield_stress', 'cohesion', 'friction_angle', 'friction_angle_damaged',
+        'till_rho_0', 'till_A', 'till_B', 'till_E_0', 'till_a', 'till_b',
+        'till_alpha', 'till_beta', 'till_E_iv', 'till_E_cv', 'rho_limit', 'cs_limit',
+        'aneos_param',
+    }
+
+    eos_extra_lines = []
+    for k, v in resolved.items():
+        # skip top-level and internal keys
+        if k in top_level_keys or k in ('instance_name',):
+            continue
+        if not isinstance(k, str):
+            continue
+        if k not in allowed_eos_keys:
+            continue
+        # skip structural-looking values
+        if isinstance(v, str) and any(ch in v for ch in '{}()'):
+            continue
+        eos_extra_lines.append(f"        {k} = {_format_value(v)}")
+
+    eos_extra = "\n".join(eos_extra_lines)
+
     content = """
 global = {{
     c_gravity = {c_gravity}
-}};
+}}
 
 materials = (
-{
-    ID = 0
-    name = "Material"
-    sml = 0.78
-    interactions = 30
-    artificial_viscosity = { alpha = 1.0; beta = 2.0; };
-    density_floor = 100.
-    eos = {
-        type = 5
-        shear_modulus = 22.7e9
-        bulk_modulus = 26.7e9
-        # include Tillotson EoS params
-        @include "material_data/basalt.till.cfg"
-        # porosity params
-        porjutzi_p_elastic = 1.0e6
-        porjutzi_p_transition = 6.80e7
-        porjutzi_p_compacted = 2.13e8
-        porjutzi_alpha_0 = 2.0
-        porjutzi_alpha_e = 4.64
-        porjutzi_alpha_t = 1.90
-        porjutzi_n1 = 12.0
-        porjutzi_n2 = 3.0
-        cs_porous = 100.0
-        crushcurve_style = 0
-        # plasticity params
-        yield_stress = 3.5e9
-	    cohesion = 1.0e6
-   	    friction_angle = 0.9827937232
-   	    friction_angle_damaged = 0.5404195003
-    };
-}
+{{
+    ID = {id}
+    name = "{simulation_name}"
+    sml = {sml}
+    interactions = {int}
+    artificial_viscosity = {artificial_viscosity}
+            eos = {{
+        type = {eos_type}
+        shear_modulus = {shear_modulus}
+        bulk_modulus = {bulk_modulus}
+        # include EoS params
+        @include "{include_path}"
+        rho_0 = {rho_0}
+        # EoS / porosity / plasticity parameters (populated from payload)
+    {eos_extra}
+    }}
+
+}}
+);
 
 """.format(
-        simulation_name=resolved.get("simulation_name", "demo"),
-        dt=resolved.get("dt", 0.01),
-        t_end=resolved.get("t_end", 1.0),
-        nx=resolved.get("nx", 64),
-        ny=resolved.get("ny", 64),
-        nz=resolved.get("nz", 64),
-        rho_0=resolved.get("rho_0", 3000.0),
-        bulk_modulus=resolved.get("bulk_modulus", 1.0e10),
+        id = resolved.get("ID", 0), # second value is default ID if not provided
+        simulation_name=resolved.get("simulation_name", "none"),
+        rho_0=resolved.get("rho_0", 0),
+        bulk_modulus=resolved.get("bulk_modulus", 0),
         n=resolved.get("n", 1.0),
         alpha=resolved.get("alpha", 1.0),
         beta=resolved.get("beta", 2.0),
         c_gravity=resolved.get("c_gravity", 6.67408e-11),
+        include_path=resolved.get("include", "material_data/basalt.till.cfg"),
+        eos_type=resolved.get("eos_type", 1),
+        shear_modulus=resolved.get("shear_modulus", 0),
+        eos_extra=eos_extra,
+        sml=resolved.get("sml", 1.0),
+        int=resolved.get("interactions", 0),
+        artificial_viscosity=resolved.get("artificial_viscosity", 1),
+        porjutzi_p_elastic=resolved.get("porjutzi_p_elastic", 0),
+        porjutzi_p_transition=resolved.get("porjutzi_p_transition", 0),
+        porjutzi_p_compacted=resolved.get("porjutzi_p_compacted", 0),
+        porjutzi_alpha_0=resolved.get("porjutzi_alpha_0", 0),
+        porjutzi_alpha_e=resolved.get("porjutzi_alpha_e", 0),
+        porjutzi_alpha_t=resolved.get("porjutzi_alpha_t", 0),
+        porjutzi_n1=resolved.get("porjutzi_n1", 0),
+        porjutzi_n2=resolved.get("porjutzi_n2", 0),
+        cs_porous=resolved.get("cs_porous", 0),
+        crushcurve_style=resolved.get("crushcurve_style", 0),
+        yield_stress=resolved.get("yield_stress", 0),
+        cohesion=resolved.get("cohesion", 0),
+        friction_angle=resolved.get("friction_angle", 0),
+        friction_angle_damaged=resolved.get("friction_angle_damaged", 0),
     )
     write_text_file(path, content)
     return content
@@ -200,6 +255,9 @@ def load_miluphcuda_config(path: Path, default_values: dict[str, Any] | None = N
             raw = value.strip()
             if not key or not value:
                 continue
+            # ignore structural tokens
+            if raw in ('{', '}', '(', ')'):
+                continue
             if raw.replace('.', '', 1).isdigit():
                 parsed[key.strip()] = float(raw) if '.' in raw else int(raw)
             else:
@@ -211,6 +269,9 @@ def load_miluphcuda_config(path: Path, default_values: dict[str, Any] | None = N
             key = key.strip()
             raw = value.strip().rstrip(";")
             if not key or not raw:
+                continue
+            # ignore structural tokens like braces or parentheses
+            if raw in ('{', '}', '(', ')'):
                 continue
             if raw.startswith('"') and raw.endswith('"'):
                 parsed[key] = raw[1:-1]

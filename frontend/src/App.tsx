@@ -1,4 +1,7 @@
 import { useEffect, useState } from 'react'
+import MATERIALS, { getMaterialByKey } from './data/materials'
+import type { MaterialData } from './data/materials'
+import EOS_DEFS, { getEosByValue } from './data/eos'
 
 type Page = 'setup' | 'run' | 'parameter' | 'config' | 'visualize'
 type InstanceMode = 'local' | 'remote_ssh'
@@ -322,6 +325,61 @@ function ConfigPage({ selectedInstanceName }: { selectedInstanceName: string }) 
     c_gravity: '6.67408e-11',
   })
   const [message, setMessage] = useState('')
+  const materials: MaterialData[] = MATERIALS
+
+  const eosOptions = EOS_DEFS.map((e) => ({ value: e.value, label: e.label }))
+
+  const [selectedMaterial, setSelectedMaterial] = useState(materials[0].key)
+  const [selectedEos, setSelectedEos] = useState<number | string>(materials[0].eosOptions?.[0]?.value ?? 0)
+  const [showCustomConfig, setShowCustomConfig] = useState(false)
+
+  useEffect(() => {
+    const mat = getMaterialByKey(selectedMaterial)
+    if (mat) {
+      setValues((prev) => ({ ...prev, sml: String((mat as any).sml), bulk_modulus: String(mat.bulk_modulus), shear_modulus: String(mat.shear_modulus), include: mat.include || '' }))
+      // allow any EOS for any material; keep EOS options global
+      const defaultEos = mat.eos_type ?? EOS_DEFS[0].value
+      setSelectedEos(defaultEos)
+      // apply per-material EOS defaults (only set keys that are not already present)
+      try {
+        const defaults = (mat as any).eosDefaults || {}
+        const d = defaults[String(defaultEos)] || {}
+        if (d && Object.keys(d).length > 0) {
+          setValues((prev) => {
+            const next = { ...prev }
+            for (const [k, v] of Object.entries(d)) {
+              if (next[k] == null || next[k] === '') next[k] = String(v)
+            }
+            return next
+          })
+        }
+      } catch (e) {
+        /* ignore */
+      }
+    }
+  }, [selectedMaterial])
+
+  useEffect(() => {
+    // set eos_type and apply any per-material defaults for this EOS selection
+    setValues((prev) => ({ ...prev, eos_type: String(selectedEos) }))
+    try {
+      const mat = getMaterialByKey(selectedMaterial) as any
+      const defaults = (mat && mat.eosDefaults) || {}
+      const d = defaults[String(selectedEos)] || {}
+      if (d && Object.keys(d).length > 0) {
+        setValues((prev) => {
+          const next = { ...prev }
+          for (const [k, v] of Object.entries(d)) {
+            // do not clobber explicit user edits — only set when empty
+            if (next[k] == null || next[k] === '') next[k] = String(v)
+          }
+          return next
+        })
+      }
+    } catch (e) {
+      /* ignore */
+    }
+  }, [selectedEos])
 
   useEffect(() => {
     const load = async () => {
@@ -329,6 +387,19 @@ function ConfigPage({ selectedInstanceName }: { selectedInstanceName: string }) 
       const data = await res.json()
       setValues((prev) => ({ ...prev, ...data.values }))
       setMessage(`Target: ${data.target || 'workspace'}`)
+      // try to initialize material/eos selectors from returned values
+      const incomingEos = data.values && (data.values.eos_type ?? data.values.eosType ?? data.values.eos)
+      const incomingInclude = data.values && data.values.include
+      if (incomingEos != null) {
+        const eosVal = String(incomingEos)
+        // find any material that has the incoming include as default, otherwise keep current material
+        const foundByInclude = materials.find((m) => m.include === data.values.include)
+        if (foundByInclude) setSelectedMaterial(foundByInclude.key)
+        setSelectedEos(eosVal)
+      } else if (incomingInclude) {
+        const foundByInclude = materials.find((m) => (m.eosOptions || []).some((o) => o.include === incomingInclude) || m.include === incomingInclude)
+        if (foundByInclude) setSelectedMaterial(foundByInclude.key)
+      }
     }
     void load()
   }, [selectedInstanceName])
@@ -339,6 +410,15 @@ function ConfigPage({ selectedInstanceName }: { selectedInstanceName: string }) 
       ...(Object.fromEntries(
         Object.entries(values).map(([key, value]) => [key, Number.isNaN(Number(value)) ? value : Number(value)]),
       )),
+      // include material/eos selection so backend can generate correct include and eos params
+      // select include path based on selected EOS option for the material
+      include: (() => {
+        const mat = getMaterialByKey(selectedMaterial) as any
+        const opt = (mat?.eosOptions || []).find((o: any) => String(o.value) === String(selectedEos))
+        return (opt && opt.include) || mat.include || ''
+      })(),
+      eos_type: Number(selectedEos),
+      shear_modulus: Number(values.shear_modulus ?? (getMaterialByKey(selectedMaterial).shear_modulus ?? 0)),
       instance_name: selectedInstanceName || undefined,
     }
     const res = await fetch('/api/templates/miluphcuda-config', {
@@ -347,7 +427,22 @@ function ConfigPage({ selectedInstanceName }: { selectedInstanceName: string }) 
       body: JSON.stringify(payload),
     })
     const data = await res.json()
-    setMessage(res.ok ? `Saved to ${data.target}` : data.detail || 'Could not save config')
+    if (res.ok) {
+      setMessage(`Saved to ${data.target}`)
+      // optimistic update: apply the sent payload to the UI immediately
+      const sent = payload as Record<string, any>
+      const sentStrings: Record<string, string> = {}
+      Object.entries(sent).forEach(([k, v]) => { sentStrings[k] = v == null ? '' : String(v) })
+      setValues((prev) => ({ ...prev, ...sentStrings }))
+      // then attempt to refetch authoritative values from server
+      const getRes = await fetch(`/api/templates/miluphcuda-config${selectedInstanceName ? `?instance_name=${encodeURIComponent(selectedInstanceName)}` : ''}`)
+      if (getRes.ok) {
+        const getData = await getRes.json()
+        setValues((prev) => ({ ...prev, ...getData.values }))
+      }
+    } else {
+      setMessage(data.detail || 'Could not save config')
+    }
   }
 
   return (
@@ -355,16 +450,121 @@ function ConfigPage({ selectedInstanceName }: { selectedInstanceName: string }) 
       <h2>MiluphCUDA Config</h2>
       <p>Edit the material config values and save them into the selected MiluphCUDA simulation folder.</p>
       <form onSubmit={save} style={{ display: 'grid', gap: '10px', maxWidth: '640px' }}>
-        {Object.entries(values).map(([key, value]) => (
-          <label key={key} style={{ display: 'grid', gap: '6px' }}>
-            <span style={{ fontWeight: 600 }}>{key}</span>
-            <input
-              value={value}
-              onChange={(event) => setValues({ ...values, [key]: event.target.value })}
-              placeholder={key}
-            />
-          </label>
-        ))}
+        <label style={{ display: 'grid', gap: '6px' }}>
+          <span style={{ fontWeight: 600 }}>Material</span>
+          <select value={selectedMaterial} onChange={(e) => setSelectedMaterial(e.target.value)}>
+            {materials.map((m) => (
+              <option key={m.key} value={m.key}>{m.label}</option>
+            ))}
+          </select>
+        </label>
+
+        <label style={{ display: 'grid', gap: '6px' }}>
+          <span style={{ fontWeight: 600 }}>Equation of State</span>
+          <select value={String(selectedEos)} onChange={(e) => setSelectedEos(Number(e.target.value))}>
+            {eosOptions.map((o) => (
+              <option key={String(o.value)} value={String(o.value)}>{o.label}</option>
+            ))}
+          </select>
+        </label>
+        {/* EOS-specific fields */}
+        {(() => {
+          const def = getEosByValue(selectedEos)
+          if (!def || !def.fields || def.fields.length === 0) return null
+          return (
+            <div style={{ border: '1px solid #eee', padding: '10px', borderRadius: '6px' }}>
+              <strong>EOS parameters ({def.label})</strong>
+              {def.fields.map((f) => {
+                const cleanKey = f.key.replace(/^eos\./, '')
+                return (
+                  <label key={f.key} style={{ display: 'grid', gap: '6px', marginTop: '8px' }}>
+                    <span style={{ fontWeight: 600 }}>{f.label}</span>
+                    <input
+                      value={String(values[cleanKey] ?? f.default ?? '')}
+                      onChange={(e) => setValues({ ...values, [cleanKey]: e.target.value })}
+                      placeholder={f.label}
+                    />
+                  </label>
+                )
+              })}
+            </div>
+          )
+        })()}
+
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <button type="button" onClick={() => setShowCustomConfig((s) => !s)}>
+            {showCustomConfig ? 'Hide custom config' : 'Show custom config'}
+          </button>
+          <span style={{ color: '#666' }}>{showCustomConfig ? 'Editing full config' : 'Basic material settings shown'}</span>
+        </div>
+
+        {(() => {
+          // keys we don't want to expose as individual editable fields
+          const excluded = new Set(['global', 'materials', 'eos', 'dt', 't_end', 'nx', 'ny', 'nz'])
+          // canonical order for config file fields (renders in this order when present)
+          const configOrder = [
+            'ID',
+            'name',
+            'sml',
+            'interactions',
+            'artificial_viscosity',
+            'include',
+            'eos_type',
+            'rho_0',
+            'bulk_modulus',
+            'shear_modulus',
+            'n',
+            'alpha',
+            'beta'
+          ]
+
+          // build the ordered list of keys to render
+          const orderedKeys: string[] = []
+          // 1) add keys from configOrder in that sequence if present and not excluded
+          for (const k of configOrder) {
+            if (!excluded.has(k) && Object.prototype.hasOwnProperty.call(values, k)) orderedKeys.push(k)
+          }
+
+          // 2) for EOS-specific fields, skip them here when they are rendered in the EOS block
+          const def = getEosByValue(selectedEos)
+          const eosKeys = (def?.fields || []).map((f) => f.key.replace(/^eos\./, ''))
+
+          // 3) append any remaining keys from values (preserve insertion order), excluding excluded and already added
+          for (const k of Object.keys(values)) {
+            if (orderedKeys.includes(k)) continue
+            if (excluded.has(k)) continue
+            if (eosKeys.includes(k)) continue
+            orderedKeys.push(k)
+          }
+
+          // render differently depending on custom mode
+          if (showCustomConfig) {
+            return orderedKeys.map((key) => (
+              <label key={key} style={{ display: 'grid', gap: '6px' }}>
+                <span style={{ fontWeight: 600 }}>{key}</span>
+                <input
+                  value={values[key] ?? ''}
+                  onChange={(event) => setValues({ ...values, [key]: event.target.value })}
+                  placeholder={key}
+                />
+              </label>
+            ))
+          }
+
+          // non-custom: only render a selected subset (but in the canonical order)
+          const common = ['simulation_name', 'sml', 'rho_0', 'bulk_modulus', 'n', 'alpha', 'beta', 'c_gravity']
+          const visible = orderedKeys.filter((k) => common.includes(k))
+          return visible.map((key) => (
+            <label key={key} style={{ display: 'grid', gap: '6px' }}>
+              <span style={{ fontWeight: 600 }}>{key}</span>
+              <input
+                value={values[key] ?? ''}
+                onChange={(event) => setValues({ ...values, [key]: event.target.value })}
+                placeholder={key}
+              />
+            </label>
+          ))
+        })()}
         <button type="submit">Save config</button>
         {message && <div>{message}</div>}
       </form>
